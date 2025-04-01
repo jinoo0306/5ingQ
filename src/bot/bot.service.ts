@@ -1,8 +1,6 @@
+/* eslint-disable @typescript-eslint/no-misused-promises */
 /* eslint-disable @typescript-eslint/no-floating-promises */
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   ActionRowBuilder,
@@ -66,6 +64,10 @@ export class BotService implements OnModuleInit {
         {
           name: '취소',
           description: '현재 모집을 취소합니다.',
+        },
+        {
+          name: '사다리',
+          description: '사다리 게임을 시작합니다.',
         },
       ];
 
@@ -197,6 +199,53 @@ export class BotService implements OnModuleInit {
           ephemeral: true,
         });
       }
+    } else if (commandName === '사다리') {
+      // 모집 세션 확인
+      const session = this.recruitmentSessions.get(channelId);
+      if (!session) {
+        await interaction.reply({
+          content: '5인큐 모임이 없습니다.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      // 참여 인원이 5명 이하인 경우
+      if (session.participants.size <= 5) {
+        await interaction.reply({
+          content: '인원이 5명 이하입니다.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      // 참여자 목록을 배열로 변환 후 무작위로 섞음
+      const participantsArray = Array.from(session.participants);
+      const shuffled = participantsArray.sort(() => Math.random() - 0.5);
+
+      // 첫 5명은 '출격', 나머지는 '탈출'
+      const goOut = shuffled.slice(0, 5);
+      const escape = shuffled.slice(5);
+
+      // Embed 메시지 작성
+      const embed = {
+        title: '사다리 게임 결과',
+        description: '랜덤으로 역할이 할당되었습니다.',
+        fields: [
+          {
+            name: '출격',
+            value: goOut.map((id) => `<@${id}>`).join('\n') || '없음',
+            inline: true,
+          },
+          {
+            name: '탈출',
+            value: escape.map((id) => `<@${id}>`).join('\n') || '없음',
+            inline: true,
+          },
+        ],
+        color: 0x00ff00,
+      };
+
+      await interaction.reply({ embeds: [embed] });
     } else {
       await interaction.reply({
         content: '알 수 없는 명령어입니다.',
