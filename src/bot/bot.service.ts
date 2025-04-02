@@ -4,6 +4,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   ActionRowBuilder,
+  ActivityType,
   ButtonBuilder,
   ButtonInteraction,
   ButtonStyle,
@@ -16,12 +17,14 @@ import {
   Routes,
   TextChannel,
 } from 'discord.js';
+import { getTodayRandomStatus } from 'src/common/utils/randomStatus';
 
 interface RecruitmentSession {
   channelId: string;
   messageId: string;
   createdAt: number;
   participants: Set<string>;
+  nonParticipants: Set<string>;
   timer: NodeJS.Timeout;
   active: boolean;
   dateString: string; // "mm월 dd일" 형식의 문자열
@@ -54,12 +57,22 @@ export class BotService implements OnModuleInit {
     this.client.once('ready', async () => {
       this.logger.log(`로그인 완료: ${this.client.user!.tag}`);
 
+      this.client.user!.setPresence({
+        activities: [
+          {
+            name: getTodayRandomStatus(),
+            type: ActivityType.Playing,
+          },
+        ],
+        status: 'online',
+      });
+
       // 슬래시 명령어 등록
       // (참고: 슬래시 명령어 이름은 Discord의 제약사항에 따라 일반적으로 영문 소문자여야 하지만, 여기서는 설명에 맞춰 "5?"와 "취소"로 사용)
       const commands = [
         {
           name: '5',
-          description: '5인큐 모집 시작 및 참여/취소 토글',
+          description: '5인큐 모집 시작',
         },
         {
           name: '취소',
@@ -79,7 +92,7 @@ export class BotService implements OnModuleInit {
       }
       try {
         if (guildId) {
-          // 길드 명령어로 등록 (즉시 반영됨)
+          // 길드 명령어로 등록
           await rest.put(
             Routes.applicationGuildCommands(this.client.user!.id, guildId),
             {
@@ -88,7 +101,7 @@ export class BotService implements OnModuleInit {
           );
           this.logger.log('길드 슬래시 명령어가 성공적으로 등록되었습니다.');
         } else {
-          // 전역 명령어 등록 (전파에 시간이 걸릴 수 있음)
+          // 전역 명령어 등록
           await rest.put(Routes.applicationCommands(this.client.user!.id), {
             body: commands,
           });
@@ -136,19 +149,28 @@ export class BotService implements OnModuleInit {
         const dateString = `${month}월 ${day}일`;
         const participants = new Set<string>();
         participants.add(user.id); // 처음 명령어 입력자는 자동 참여
+        const nonParticipants = new Set<string>();
 
-        // 버튼 생성 (활성 상태)
-        const button = new ButtonBuilder()
-          .setCustomId('recruitment_button')
-          .setLabel('참여/취소')
+        // 두 개의 버튼 생성: 참여, 불참
+        const participateButton = new ButtonBuilder()
+          .setCustomId('participate_button')
+          .setLabel('참여')
           .setStyle(ButtonStyle.Primary)
           .setDisabled(false);
-        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+        const nonParticipateButton = new ButtonBuilder()
+          .setCustomId('non_participate_button')
+          .setLabel('불참')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(false);
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          participateButton,
+          nonParticipateButton,
+        );
 
-        const content = `🎮  ${dateString} 5인큐 모집  🎮\n\n참여자:\n<@${user.id}>`;
+        const content = `🎮  ${dateString} 5인큐 모집  🎮\n\n[참여자]\n<@${user.id}>\n\n[불참자]\n없음`;
         const sentMessage = await channel.send({ content, components: [row] });
 
-        // 12시간 후(43200000ms) 자동으로 버튼 비활성화 처리
+        // 12시간 후(43200000ms) 자동 버튼 비활성화 처리
         const timer = setTimeout(() => {
           this.disableRecruitment(channelId);
         }, 43200000);
@@ -158,6 +180,7 @@ export class BotService implements OnModuleInit {
           messageId: sentMessage.id,
           createdAt: Date.now(),
           participants,
+          nonParticipants,
           timer,
           active: true,
           dateString,
@@ -170,16 +193,13 @@ export class BotService implements OnModuleInit {
           flags: MessageFlags.Ephemeral,
         });
       } else {
-        // 이미 활성화된 모집 세션이 있으면 참여 상태 토글
-        if (session.participants.has(user.id)) {
-          session.participants.delete(user.id);
-        } else {
-          session.participants.add(user.id);
-        }
-        await this.updateRecruitmentMessage(session, channel);
+        // 이미 활성 모집 세션이 있을 경우, 현재 모집 진행상황을 다시 보여줍니다.
+        const recruitmentMessage = await channel.messages.fetch(
+          session.messageId,
+        );
         await interaction.reply({
-          content: '참여 상태가 업데이트되었습니다.',
-          ephemeral: true,
+          content: recruitmentMessage.content,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } else if (commandName === '취소') {
@@ -209,6 +229,7 @@ export class BotService implements OnModuleInit {
         });
         return;
       }
+
       // 참여 인원이 5명 이하인 경우
       if (session.participants.size <= 5) {
         await interaction.reply({
@@ -256,12 +277,11 @@ export class BotService implements OnModuleInit {
 
   // 버튼 클릭 시 참여/취소 토글 처리
   private async handleButton(interaction: ButtonInteraction) {
-    if (interaction.customId !== 'recruitment_button') return;
     const { channelId, user, channel } = interaction;
     if (!channel || !(channel instanceof TextChannel)) {
       await interaction.reply({
         content: '이 버튼은 텍스트 채널에서만 사용할 수 있습니다.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -269,20 +289,35 @@ export class BotService implements OnModuleInit {
     if (!session || !session.active) {
       await interaction.reply({
         content: '현재 활성화된 모집이 없습니다.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
-    if (session.participants.has(user.id)) {
-      session.participants.delete(user.id);
-    } else {
+    // 이미 선택한 경우에는 재선택 불가
+    if (
+      session.participants.has(user.id) ||
+      session.nonParticipants.has(user.id)
+    ) {
+      await interaction.reply({
+        content: '이미 선택하셨습니다.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (interaction.customId === 'participate_button') {
       session.participants.add(user.id);
+      await interaction.reply({
+        content: '참여 상태가 업데이트되었습니다.',
+        flags: MessageFlags.Ephemeral,
+      });
+    } else if (interaction.customId === 'non_participate_button') {
+      session.nonParticipants.add(user.id);
+      await interaction.reply({
+        content: '불참 상태가 업데이트되었습니다.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     await this.updateRecruitmentMessage(session, channel);
-    await interaction.reply({
-      content: '참여 상태가 업데이트되었습니다.',
-      ephemeral: true,
-    });
   }
 
   // 모집 메시지 업데이트 (참여자 목록 및 버튼 활성/비활성 상태)
@@ -292,19 +327,35 @@ export class BotService implements OnModuleInit {
   ) {
     try {
       const message = await channel.messages.fetch(session.messageId);
-      const button = new ButtonBuilder()
-        .setCustomId('recruitment_button')
-        .setLabel('참여/취소')
+      // 버튼은 그대로 두고...
+      const participateButton = new ButtonBuilder()
+        .setCustomId('participate_button')
+        .setLabel('참여')
         .setStyle(ButtonStyle.Primary)
-        .setDisabled(!session.active);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+        .setDisabled(false);
+      const nonParticipateButton = new ButtonBuilder()
+        .setCustomId('non_participate_button')
+        .setLabel('불참')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(false);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        participateButton,
+        nonParticipateButton,
+      );
+
       const participantsList =
         session.participants.size > 0
           ? Array.from(session.participants)
               .map((id) => `<@${id}>`)
               .join('\n')
           : '없음';
-      const content = `${session.dateString} 5인큐 모집\n\n참여자:\n${participantsList}`;
+      const nonParticipantsList =
+        session.nonParticipants.size > 0
+          ? Array.from(session.nonParticipants)
+              .map((id) => `<@${id}>`)
+              .join('\n')
+          : '없음';
+      const content = `${session.dateString} 5인큐 모집\n\n[참여자]\n${participantsList}\n\n[불참자]\n${nonParticipantsList}`;
       await message.edit({ content, components: [row] });
     } catch (error) {
       this.logger.error('모집 메시지 업데이트 중 에러:', error);
@@ -330,12 +381,21 @@ export class BotService implements OnModuleInit {
     try {
       const message = await channel.messages.fetch(session.messageId);
       // 버튼을 비활성화하여 모집 종료 처리
-      const button = new ButtonBuilder()
-        .setCustomId('recruitment_button')
-        .setLabel('참여/취소')
+
+      const participateButton = new ButtonBuilder()
+        .setCustomId('participate_button')
+        .setLabel('참여')
         .setStyle(ButtonStyle.Primary)
         .setDisabled(true);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+      const nonParticipateButton = new ButtonBuilder()
+        .setCustomId('non_participate_button')
+        .setLabel('불참')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        participateButton,
+        nonParticipateButton,
+      );
       const newContent = message.content + '\n\n[모집 종료]';
       await message.edit({ content: newContent, components: [row] });
     } catch (error) {
