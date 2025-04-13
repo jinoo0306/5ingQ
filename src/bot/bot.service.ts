@@ -143,7 +143,10 @@ export class BotService implements OnModuleInit {
       // 채널에 활성 모집 세션이 없으면 새로 생성, 있으면 참여 토글
       let session = this.recruitmentSessions.get(channelId);
       if (!session || !session.active) {
-        const now = new Date();
+        const date = new Date();
+        const now = new Date(
+          date.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }),
+        );
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const day = now.getDate().toString().padStart(2, '0');
         const dateString = `${month}월 ${day}일`;
