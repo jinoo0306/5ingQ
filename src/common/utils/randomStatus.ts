@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { LOL_CHAMPIONS_KR } from '../constants/champions';
 import { LOL_LINES } from '../constants/lines';
 
