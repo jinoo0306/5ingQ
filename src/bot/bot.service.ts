@@ -211,13 +211,15 @@ export class BotService implements OnModuleInit {
           flags: MessageFlags.Ephemeral,
         });
       } else {
-        // 이미 활성 모집 세션이 있을 경우, 현재 모집 진행상황을 다시 보여줍니다.
+        // 이미 활성 모집 세션이 있을 경우, 현재 모집 진행상황(내용과 버튼)을 모두에게 보여줍니다.
         const recruitmentMessage = await channel.messages.fetch(
           session.messageId,
         );
         await interaction.reply({
           content: recruitmentMessage.content,
-          flags: MessageFlags.Ephemeral,
+          components: recruitmentMessage.components
+            ? recruitmentMessage.components
+            : [],
         });
       }
     } else if (commandName === '취소') {
