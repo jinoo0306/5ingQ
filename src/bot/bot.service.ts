@@ -28,6 +28,7 @@ interface RecruitmentSession {
   timer: NodeJS.Timeout;
   active: boolean;
   dateString: string; // "mm월 dd일" 형식의 문자열
+  expirationTime: number; // 모집 만료 시간 (ms timestamp)
 }
 
 @Injectable()
@@ -81,6 +82,18 @@ export class BotService implements OnModuleInit {
         {
           name: '사다리',
           description: '사다리 게임을 시작합니다.',
+        },
+        {
+          name: '연장',
+          description: '모집 시간을 연장합니다.',
+          options: [
+            {
+              name: 'time',
+              description: '연장할 시간(최대 12시간, 단위: 시간)',
+              type: 4, // INTEGER 타입 (Discord API에서 정수 타입)
+              required: true,
+            },
+          ],
         },
       ];
 
@@ -174,9 +187,10 @@ export class BotService implements OnModuleInit {
         const sentMessage = await channel.send({ content, components: [row] });
 
         // 12시간 후(43200000ms) 자동 버튼 비활성화 처리
+        const duration = 43200000; // 12시간 in ms
         const timer = setTimeout(() => {
           this.disableRecruitment(channelId);
-        }, 43200000);
+        }, duration);
 
         session = {
           channelId,
@@ -187,6 +201,7 @@ export class BotService implements OnModuleInit {
           timer,
           active: true,
           dateString,
+          expirationTime: Date.now() + duration, // 추가: 모집 만료 시간 저장
         };
 
         this.recruitmentSessions.set(channelId, session);
@@ -270,6 +285,45 @@ export class BotService implements OnModuleInit {
       };
 
       await interaction.reply({ embeds: [embed] });
+    } else if (commandName === '연장') {
+      // extensionTime은 정수 값(시간 단위)로 받음
+      const extensionTime = interaction.options.getInteger('time');
+      if (extensionTime === null) {
+        await interaction.reply({
+          content: '연장할 시간을 숫자로 입력해주세요.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      if (extensionTime > 12) {
+        await interaction.reply({
+          content: '최대 12시간까지 연장 가능합니다.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      const session = this.recruitmentSessions.get(channelId);
+      if (!session || !session.active) {
+        await interaction.reply({
+          content: '현재 활성화된 모집이 없습니다.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      // 기존 타이머 취소하고, 만료 시간 갱신 (추가 연장 시간: extensionTime * 3600000 ms)
+      session.expirationTime += extensionTime * 3600000;
+      clearTimeout(session.timer);
+      const newDelay = session.expirationTime - Date.now();
+      session.timer = setTimeout(() => {
+        this.disableRecruitment(channelId);
+      }, newDelay);
+
+      await interaction.reply({
+        content: `모집 시간이 ${extensionTime}시간 연장되었습니다.`,
+        flags: MessageFlags.Ephemeral,
+      });
     } else {
       await interaction.reply({
         content: '알 수 없는 명령어입니다.',
