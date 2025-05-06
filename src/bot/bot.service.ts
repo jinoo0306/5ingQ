@@ -96,6 +96,19 @@ export class BotService implements OnModuleInit {
             },
           ],
         },
+        {
+          name: '활동',
+          description: '봇 활동 상태를 변경합니다. (랜덤 또는 "원하는 텍스트")',
+          options: [
+            {
+              name: 'text',
+              description:
+                '랜덤으로 설정하려면 랜덤, 직접 설정 시에는 따옴표 없이 텍스트 입력',
+              type: 3, // STRING
+              required: true,
+            },
+          ],
+        },
       ];
 
       // 글로벌 명령어로 등록 (테스트 시에는 특정 길드에 등록하면 빠르게 적용됨)
@@ -336,6 +349,34 @@ export class BotService implements OnModuleInit {
       await interaction.reply({
         content: `모집 시간이 ${extensionTime}시간 연장되었습니다.`,
         flags: MessageFlags.Ephemeral,
+      });
+    } else if (commandName === '활동') {
+      const text = interaction.options.getString('text', true).trim();
+
+      let statusText: string;
+      if (text === '랜덤') {
+        // 랜덤 명령어
+        statusText = getTodayRandomStatus();
+      } else {
+        // 직접 입력 (따옴표 없이 입력)
+        statusText = text;
+      }
+
+      // Presence 갱신
+      this.client.user!.setPresence({
+        activities: [
+          {
+            name: `${statusText}`,
+            type: ActivityType.Playing,
+          },
+        ],
+        status: 'online',
+      });
+
+      // 사용자에게 확인 메시지
+      await interaction.reply({
+        content: `🌟 활동 상태를 \`${statusText} 하는 중\` 으로 변경했습니다!`,
+        ephemeral: true,
       });
     } else {
       await interaction.reply({
