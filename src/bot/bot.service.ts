@@ -24,11 +24,12 @@ interface RecruitmentSession {
   messageId: string;
   createdAt: number;
   participants: Set<string>;
+  lateParticipants: Set<string>;
   nonParticipants: Set<string>;
   timer: NodeJS.Timeout;
   active: boolean;
-  dateString: string; // "mm월 dd일" 형식의 문자열
-  expirationTime: number; // 모집 만료 시간 (ms timestamp)
+  dateString: string;
+  expirationTime: number;
 }
 
 @Injectable()
@@ -166,20 +167,29 @@ export class BotService implements OnModuleInit {
         const participants = new Set<string>();
         participants.add(user.id); // 처음 명령어 입력자는 자동 참여
         const nonParticipants = new Set<string>();
+        const lateParticipants = new Set<string>();
 
-        // 두 개의 버튼 생성: 참여, 불참
+        // 세 개의 버튼 생성: 참여, 불참
         const participateButton = new ButtonBuilder()
           .setCustomId('participate_button')
           .setLabel('참여')
           .setStyle(ButtonStyle.Primary)
           .setDisabled(false);
+
+        const lateButton = new ButtonBuilder()
+          .setCustomId('late_participate_button')
+          .setLabel('늦참')
+          .setStyle(ButtonStyle.Success);
+
         const nonParticipateButton = new ButtonBuilder()
           .setCustomId('non_participate_button')
           .setLabel('불참')
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(false);
+
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
           participateButton,
+          lateButton,
           nonParticipateButton,
         );
 
@@ -197,6 +207,7 @@ export class BotService implements OnModuleInit {
           messageId: sentMessage.id,
           createdAt: Date.now(),
           participants,
+          lateParticipants,
           nonParticipants,
           timer,
           active: true,
@@ -355,27 +366,28 @@ export class BotService implements OnModuleInit {
     // 이미 선택한 경우에는 재선택 불가
     if (
       session.participants.has(user.id) ||
+      session.lateParticipants.has(user.id) ||
       session.nonParticipants.has(user.id)
     ) {
-      await interaction.reply({
+      return interaction.reply({
         content: '이미 선택하셨습니다.',
         flags: MessageFlags.Ephemeral,
       });
-      return;
     }
     if (interaction.customId === 'participate_button') {
       session.participants.add(user.id);
-      await interaction.reply({
-        content: '참여 상태가 업데이트되었습니다.',
-        flags: MessageFlags.Ephemeral,
-      });
+    } else if (interaction.customId === 'late_participate_button') {
+      session.lateParticipants.add(user.id);
     } else if (interaction.customId === 'non_participate_button') {
       session.nonParticipants.add(user.id);
-      await interaction.reply({
-        content: '불참 상태가 업데이트되었습니다.',
-        flags: MessageFlags.Ephemeral,
-      });
+    } else {
+      return;
     }
+    // (이미 선택했는지 검사하는 로직에 session.lateParticipants.has(user.id) 도 포함)
+    await interaction.reply({
+      content: '상태가 업데이트되었습니다.',
+      flags: MessageFlags.Ephemeral,
+    });
     await this.updateRecruitmentMessage(session, channel);
   }
 
@@ -384,41 +396,38 @@ export class BotService implements OnModuleInit {
     session: RecruitmentSession,
     channel: TextChannel,
   ) {
-    try {
-      const message = await channel.messages.fetch(session.messageId);
-      // 버튼은 그대로 두고...
-      const participateButton = new ButtonBuilder()
-        .setCustomId('participate_button')
-        .setLabel('참여')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(false);
-      const nonParticipateButton = new ButtonBuilder()
-        .setCustomId('non_participate_button')
-        .setLabel('불참')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(false);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        participateButton,
-        nonParticipateButton,
-      );
+    const message = await channel.messages.fetch(session.messageId);
 
-      const participantsList =
-        session.participants.size > 0
-          ? Array.from(session.participants)
-              .map((id) => `<@${id}>`)
-              .join('\n')
-          : '없음';
-      const nonParticipantsList =
-        session.nonParticipants.size > 0
-          ? Array.from(session.nonParticipants)
-              .map((id) => `<@${id}>`)
-              .join('\n')
-          : '없음';
-      const content = `${session.dateString} 5인큐 모집\n\n[참여자]\n${participantsList}\n\n[불참자]\n${nonParticipantsList}`;
-      await message.edit({ content, components: [row] });
-    } catch (error) {
-      this.logger.error('모집 메시지 업데이트 중 에러:', error);
-    }
+    // 버튼은 그대로 재생성
+    const participateButton = new ButtonBuilder(); /*...*/
+    const lateButton = new ButtonBuilder(); /*...*/
+    const nonParticipateButton = new ButtonBuilder(); /*...*/
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      participateButton,
+      lateButton,
+      nonParticipateButton,
+    );
+
+    // 참여자 목록: 일반 + (늦참)
+    const normalList = Array.from(session.participants)
+      .map((id) => `<@${id}>`)
+      .join('\n');
+    const lateList = Array.from(session.lateParticipants)
+      .map((id) => `<@${id}> (늦참)`)
+      .join('\n');
+    const participantsList = [normalList, lateList].filter(Boolean).join('\n');
+
+    // 불참자
+    const nonList =
+      Array.from(session.nonParticipants)
+        .map((id) => `<@${id}>`)
+        .join('\n') || '없음';
+
+    const content = `${session.dateString} 5인큐 모집\n
+[참여자]\n${participantsList || '없음'}\n
+[불참자]\n${nonList}`;
+
+    await message.edit({ content, components: [row] });
   }
 
   // 모집 세션 비활성화 (12시간 경과 또는 /취소 명령어 시)
