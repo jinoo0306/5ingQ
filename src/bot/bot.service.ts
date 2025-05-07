@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion */
 /* eslint-disable @typescript-eslint/no-misused-promises */
 /* eslint-disable @typescript-eslint/no-floating-promises */
 
@@ -12,6 +14,7 @@ import {
   Client,
   GatewayIntentBits,
   Interaction,
+  Message,
   MessageFlags,
   REST,
   Routes,
@@ -21,7 +24,7 @@ import { getTodayRandomStatus } from 'src/common/utils/randomStatus';
 
 interface RecruitmentSession {
   channelId: string;
-  messageId: string;
+  messageIds: Set<string>;
   createdAt: number;
   participants: Set<string>;
   lateParticipants: Set<string>;
@@ -217,7 +220,7 @@ export class BotService implements OnModuleInit {
 
         session = {
           channelId,
-          messageId: sentMessage.id,
+          messageIds: new Set([sentMessage.id]),
           createdAt: Date.now(),
           participants,
           lateParticipants,
@@ -235,16 +238,19 @@ export class BotService implements OnModuleInit {
           flags: MessageFlags.Ephemeral,
         });
       } else {
-        // 이미 활성 모집 세션이 있을 경우, 현재 모집 진행상황(내용과 버튼)을 모두에게 보여줍니다.
+        // 기존: recruitmentMessage.content 만 reply
         const recruitmentMessage = await channel.messages.fetch(
-          session.messageId,
+          session.messageIds.values().next().value,
         );
-        await interaction.reply({
+
+        // public reply를 보낸 뒤 그 ID도 저장
+        const replyMsg = (await interaction.reply({
           content: recruitmentMessage.content,
-          components: recruitmentMessage.components
-            ? recruitmentMessage.components
-            : [],
-        });
+          components: recruitmentMessage.components ?? [],
+          fetchReply: true,
+        })) as Message;
+
+        session.messageIds.add(replyMsg.id);
       }
     } else if (commandName === '취소') {
       // 활성 모집 세션이 있으면 취소 처리
@@ -437,38 +443,54 @@ export class BotService implements OnModuleInit {
     session: RecruitmentSession,
     channel: TextChannel,
   ) {
-    const message = await channel.messages.fetch(session.messageId);
-
-    // 버튼은 그대로 재생성
-    const participateButton = new ButtonBuilder(); /*...*/
-    const lateButton = new ButtonBuilder(); /*...*/
-    const nonParticipateButton = new ButtonBuilder(); /*...*/
+    // 1) 버튼 재생성
+    const participateButton = new ButtonBuilder()
+      .setCustomId('participate_button')
+      .setLabel('참여')
+      .setStyle(ButtonStyle.Primary);
+    const lateButton = new ButtonBuilder()
+      .setCustomId('late_participate_button')
+      .setLabel('늦참')
+      .setStyle(ButtonStyle.Success);
+    const nonParticipateButton = new ButtonBuilder()
+      .setCustomId('non_participate_button')
+      .setLabel('불참')
+      .setStyle(ButtonStyle.Secondary);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       participateButton,
       lateButton,
       nonParticipateButton,
     );
 
-    // 참여자 목록: 일반 + (늦참)
+    // 2) 텍스트 구성
     const normalList = Array.from(session.participants)
       .map((id) => `<@${id}>`)
       .join('\n');
     const lateList = Array.from(session.lateParticipants)
       .map((id) => `<@${id}> (늦참)`)
       .join('\n');
-    const participantsList = [normalList, lateList].filter(Boolean).join('\n');
+    const participantsList =
+      [normalList, lateList].filter(Boolean).join('\n') || '없음';
 
-    // 불참자
     const nonList =
       Array.from(session.nonParticipants)
         .map((id) => `<@${id}>`)
         .join('\n') || '없음';
 
-    const content = `${session.dateString} 5인큐 모집\n
-[참여자]\n${participantsList || '없음'}\n
-[불참자]\n${nonList}`;
+    const content =
+      `${session.dateString} 5인큐 모집\n\n` +
+      `[참여자]\n${participantsList}\n\n` +
+      `[불참자]\n${nonList}`;
 
-    await message.edit({ content, components: [row] });
+    // 3) 모든 메시지에 대해 edit 호출
+    for (const messageId of session.messageIds) {
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        await msg.edit({ content, components: [row] });
+      } catch {
+        // 이미 삭제되었거나 권한이 없으면 무시
+      }
+    }
   }
 
   // 모집 세션 비활성화 (12시간 경과 또는 /취소 명령어 시)
@@ -479,37 +501,50 @@ export class BotService implements OnModuleInit {
     const session = this.recruitmentSessions.get(channelId);
     if (!session) return;
     session.active = false;
+
+    // 채널 가져오기
     let channel: TextChannel;
     if (channelOverride) {
       channel = channelOverride;
     } else {
-      const fetchedChannel = await this.client.channels.fetch(channelId);
-      if (!fetchedChannel || !(fetchedChannel instanceof TextChannel)) return;
-      channel = fetchedChannel;
+      const fetched = await this.client.channels.fetch(channelId);
+      if (!fetched || !(fetched instanceof TextChannel)) return;
+      channel = fetched;
     }
-    try {
-      const message = await channel.messages.fetch(session.messageId);
-      // 버튼을 비활성화하여 모집 종료 처리
 
-      const participateButton = new ButtonBuilder()
-        .setCustomId('participate_button')
-        .setLabel('참여')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(true);
-      const nonParticipateButton = new ButtonBuilder()
-        .setCustomId('non_participate_button')
-        .setLabel('불참')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(true);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        participateButton,
-        nonParticipateButton,
-      );
-      const newContent = message.content + '\n\n[모집 종료]';
-      await message.edit({ content: newContent, components: [row] });
-    } catch (error) {
-      this.logger.error('모집 종료 처리 중 에러:', error);
+    // 비활성화된 버튼 행 미리 생성
+    const participateButton = new ButtonBuilder()
+      .setCustomId('participate_button')
+      .setLabel('참여')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(true);
+    const lateButton = new ButtonBuilder()
+      .setCustomId('late_participate_button')
+      .setLabel('늦참')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(true);
+    const nonParticipateButton = new ButtonBuilder()
+      .setCustomId('non_participate_button')
+      .setLabel('불참')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true);
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      participateButton,
+      lateButton,
+      nonParticipateButton,
+    );
+
+    // messageIds 모두 순회하며 edit
+    for (const messageId of session.messageIds) {
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        const newContent = msg.content + '\n\n[모집 종료]';
+        await msg.edit({ content: newContent, components: [row] });
+      } catch {
+        // 메시지가 삭제되었거나 접근 불가인 경우 무시
+      }
     }
+
     this.recruitmentSessions.delete(channelId);
   }
 }
