@@ -549,7 +549,7 @@ export class BotService implements OnModuleInit {
         .join('\n') || '없음';
 
     const content =
-      `${session.dateString} 5인큐 모집\n\n` +
+      `🎮 ${session.dateString} 5인큐 모집 🎮\n\n` +
       `[참여자]\n${participantsList}\n\n` +
       `[불참자]\n${nonList}`;
 
