@@ -16,9 +16,12 @@ import {
   Interaction,
   Message,
   MessageFlags,
+  ModalBuilder,
   REST,
   Routes,
   TextChannel,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import { getTodayRandomStatus } from 'src/common/utils/randomStatus';
 
@@ -27,7 +30,7 @@ interface RecruitmentSession {
   messageIds: Set<string>;
   createdAt: number;
   participants: Set<string>;
-  lateParticipants: Set<string>;
+  lateParticipants: Map<string, string>;
   nonParticipants: Set<string>;
   timer: NodeJS.Timeout;
   active: boolean;
@@ -145,10 +148,48 @@ export class BotService implements OnModuleInit {
     // 상호작용 이벤트 처리
     this.client.on('interactionCreate', async (interaction: Interaction) => {
       try {
+        // 1) 슬래시 커맨드
         if (interaction.isChatInputCommand()) {
           await this.handleCommand(interaction);
+
+          // 2) 버튼 클릭
         } else if (interaction.isButton()) {
           await this.handleButton(interaction);
+
+          // 3) Modal 제출
+        } else if (
+          interaction.isModalSubmit() &&
+          interaction.customId === 'late_modal'
+        ) {
+          // ← 여기를 추가하세요
+          const channel = interaction.channel as TextChannel;
+          const session = this.recruitmentSessions.get(interaction.channelId!);
+          if (!session || !session.active) {
+            return interaction.reply({
+              content: '현재 활성 모집이 없습니다.',
+              ephemeral: true,
+            });
+          }
+          const lateTime = interaction.fields
+            .getTextInputValue('late_time_input')
+            .trim();
+          const userId = interaction.user.id;
+          if (
+            session.participants.has(userId) ||
+            session.lateParticipants.has(userId) ||
+            session.nonParticipants.has(userId)
+          ) {
+            return interaction.reply({
+              content: '이미 선택하셨습니다.',
+              ephemeral: true,
+            });
+          }
+          session.lateParticipants.set(userId, lateTime);
+          await this.updateRecruitmentMessage(session, channel);
+          return interaction.reply({
+            content: `✅ 늦참 시간: ${lateTime}`,
+            ephemeral: true,
+          });
         }
       } catch (error) {
         this.logger.error('상호작용 처리 중 에러:', error);
@@ -183,7 +224,7 @@ export class BotService implements OnModuleInit {
         const participants = new Set<string>();
         participants.add(user.id); // 처음 명령어 입력자는 자동 참여
         const nonParticipants = new Set<string>();
-        const lateParticipants = new Set<string>();
+        const lateParticipants = new Map<string, string>();
 
         // 세 개의 버튼 생성: 참여, 불참
         const participateButton = new ButtonBuilder()
@@ -394,23 +435,26 @@ export class BotService implements OnModuleInit {
 
   // 버튼 클릭 시 참여/취소 토글 처리
   private async handleButton(interaction: ButtonInteraction) {
-    const { channelId, user, channel } = interaction;
+    const { customId, channelId, user, channel } = interaction;
+
+    // 1) 텍스트 채널이 아니면 무시
     if (!channel || !(channel instanceof TextChannel)) {
-      await interaction.reply({
+      return interaction.reply({
         content: '이 버튼은 텍스트 채널에서만 사용할 수 있습니다.',
         flags: MessageFlags.Ephemeral,
       });
-      return;
     }
+
+    // 2) 활성 세션 가져오기
     const session = this.recruitmentSessions.get(channelId);
     if (!session || !session.active) {
-      await interaction.reply({
+      return interaction.reply({
         content: '현재 활성화된 모집이 없습니다.',
         flags: MessageFlags.Ephemeral,
       });
-      return;
     }
-    // 이미 선택한 경우에는 재선택 불가
+
+    // 3) 이미 선택했는지 중복 검사
     if (
       session.participants.has(user.id) ||
       session.lateParticipants.has(user.id) ||
@@ -421,21 +465,48 @@ export class BotService implements OnModuleInit {
         flags: MessageFlags.Ephemeral,
       });
     }
-    if (interaction.customId === 'participate_button') {
+
+    // 4) 버튼별 처리
+    if (customId === 'participate_button') {
+      // 일반 참여
       session.participants.add(user.id);
-    } else if (interaction.customId === 'late_participate_button') {
-      session.lateParticipants.add(user.id);
-    } else if (interaction.customId === 'non_participate_button') {
+      await interaction.reply({
+        content: '참여 업데이트',
+        flags: MessageFlags.Ephemeral,
+      });
+    } else if (customId === 'late_participate_button') {
+      // *** 늦참 모달 띄우기 ***
+      const modal = new ModalBuilder()
+        .setCustomId('late_modal')
+        .setTitle('늦참 시간 입력');
+
+      const timeInput = new TextInputBuilder()
+        .setCustomId('late_time_input')
+        .setLabel('5인큐 참여 가능 시간을 입력하세요')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('예: 23시 또는 1시 반')
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(timeInput),
+      );
+
+      return interaction.showModal(modal);
+    } else if (customId === 'non_participate_button') {
+      // 불참
       session.nonParticipants.add(user.id);
+
+      await interaction.reply({
+        content: '불참 상태가 업데이트되었습니다.',
+        flags: MessageFlags.Ephemeral,
+      });
     } else {
+      // 그 외
       return;
     }
-    // (이미 선택했는지 검사하는 로직에 session.lateParticipants.has(user.id) 도 포함)
-    await interaction.reply({
-      content: '상태가 업데이트되었습니다.',
-      flags: MessageFlags.Ephemeral,
-    });
-    await this.updateRecruitmentMessage(session, channel);
+
+    // 5) 모든 참여/불참/늦참 메시지 갱신
+    await this.updateRecruitmentMessage(session, channel as TextChannel);
   }
 
   // 모집 메시지 업데이트 (참여자 목록 및 버튼 활성/비활성 상태)
@@ -466,8 +537,8 @@ export class BotService implements OnModuleInit {
     const normalList = Array.from(session.participants)
       .map((id) => `<@${id}>`)
       .join('\n');
-    const lateList = Array.from(session.lateParticipants)
-      .map((id) => `<@${id}> (늦참)`)
+    const lateList = Array.from(session.lateParticipants.entries())
+      .map(([id, time]) => `<@${id}> (${time})`)
       .join('\n');
     const participantsList =
       [normalList, lateList].filter(Boolean).join('\n') || '없음';
